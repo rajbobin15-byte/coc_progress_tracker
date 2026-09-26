@@ -8,9 +8,15 @@ services:
     envVars:
       - key: COC_API_TOKEN
         sync: false   # set the real value in the Render dashboard, not here
+                       # (not needed if COC_EMAIL/COC_PASSWORD below are set)
       - key: CLAN_TAG
         sync: false
       - key: DATABASE_URL
         sync: false   # your Neon connection string, e.g. postgresql://user:pass@host/db?sslmode=require
                        # leave this var unset entirely to keep using local SQLite instead
+      - key: COC_EMAIL
+        sync: false   # optional: developer.clashofclans.com login, enables
+                       # automatic token refresh - see .env.example
+      - key: COC_PASSWORD
+        sync: false   # optional, paired with COC_EMAIL above
 

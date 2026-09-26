@@ -12,6 +12,8 @@ from urllib.parse import quote
 import requests
 from dotenv import load_dotenv
 
+from src import token_manager
+
 BASE_URL = "https://api.clashofclans.com/v1"
 REQUEST_TIMEOUT = 15  # seconds
 
@@ -74,32 +76,71 @@ def normalize_clan_tag(raw_tag):
 
 def load_config():
     """
-    Read COC_API_TOKEN and CLAN_TAG.
+    Read CLAN_TAG (and, unless token auto-refresh is configured, COC_API_TOKEN).
 
     Locally, these come from a .env file next to the project (loaded here).
     On a host like Render there is no .env file - the same variable names are
     set directly in the platform's environment, and load_dotenv() is a no-op
     if the file doesn't exist, so os.getenv() below picks them up either way.
+
+    The returned token is informational/backwards-compatible only: the
+    actual token used for requests is resolved per-call by _resolve_token(),
+    so it can be refreshed automatically without callers needing to re-read
+    config. If COC_EMAIL/COC_PASSWORD are set, the token slot here is simply
+    None - it gets minted lazily on first use.
     """
     if ENV_PATH.exists():
         # override=True so edits to .env take effect without restarting Streamlit.
         load_dotenv(ENV_PATH, override=True)
 
-    token = os.getenv("COC_API_TOKEN", "").strip()
     raw_tag = os.getenv("CLAN_TAG", "").strip()
-
-    if not token or token == PLACEHOLDER_TOKEN:
-        raise ConfigError(
-            "COC_API_TOKEN is missing. Locally: add it to your .env file. "
-            "On Render: set it as an Environment Variable in the service settings."
-        )
     if not raw_tag:
         raise ConfigError(
             "CLAN_TAG is missing. Locally: add it to your .env file. "
             "On Render: set it as an Environment Variable in the service settings."
         )
 
+    if token_manager.auto_refresh_enabled():
+        token = None
+    else:
+        token = os.getenv("COC_API_TOKEN", "").strip()
+        if not token or token == PLACEHOLDER_TOKEN:
+            raise ConfigError(
+                "COC_API_TOKEN is missing, and automatic refresh isn't configured "
+                "either. Locally: add COC_API_TOKEN to your .env file. On Render: "
+                "set it as an Environment Variable, or set COC_EMAIL/COC_PASSWORD "
+                "to mint and refresh tokens automatically instead."
+            )
+
     return token, normalize_clan_tag(raw_tag)
+
+
+def _resolve_token(force_refresh=False):
+    """
+    Return a token to use right now. Prefers the auto-refresh path (a token
+    minted for the current IP, cached in the database) when COC_EMAIL/
+    COC_PASSWORD are set; otherwise falls back to the static COC_API_TOKEN
+    env var.
+    """
+    if token_manager.auto_refresh_enabled():
+        try:
+            token = token_manager.ensure_token(force_refresh=force_refresh)
+            if token:
+                return token
+        except token_manager.TokenRefreshError as exc:
+            if force_refresh:
+                raise ConfigError(f"Could not auto-refresh the Clash of Clans API token: {exc}")
+            # Fall through and try the static token below, in case a manually
+            # set COC_API_TOKEN still works.
+
+    token = os.getenv("COC_API_TOKEN", "").strip()
+    if token and token != PLACEHOLDER_TOKEN:
+        return token
+
+    raise ConfigError(
+        "No usable COC_API_TOKEN, and automatic refresh (COC_EMAIL/COC_PASSWORD) "
+        "is either not configured or failed."
+    )
 
 
 # ---------------------------------------------------------------- HTTP
@@ -181,13 +222,30 @@ def _get(path, token):
     raise ClashAPIError(f"Unexpected API response (HTTP {status})." + api_said)
 
 
+def _get_with_retry(path):
+    """
+    Like _get, but if the token is rejected (403) and auto-refresh is
+    configured, mint a fresh token for the current IP and retry once before
+    giving up. This is what lets the app heal itself after Render (or any
+    host with a non-static IP) restarts with a new outbound address.
+    """
+    token = _resolve_token()
+    try:
+        return _get(path, token)
+    except InvalidTokenError:
+        if not token_manager.auto_refresh_enabled():
+            raise
+        token = _resolve_token(force_refresh=True)
+        return _get(path, token)
+
+
 # ---------------------------------------------------------------- public API
 
 def get_clan_info():
     """Fetch the configured clan (GET /clans/{clanTag}) and return the JSON dict."""
-    token, clan_tag = load_config()
+    _, clan_tag = load_config()
     encoded_tag = quote(clan_tag, safe="")  # '#' must be sent as %23
-    return _get(f"/clans/{encoded_tag}", token)
+    return _get_with_retry(f"/clans/{encoded_tag}")
 
 
 # =====================================================================
@@ -202,54 +260,52 @@ def _tag_path(tag):
     return quote(tag, safe="")  # '#' must be sent as %23
 
 
-def _get_war_data(path, token):
-    """Like _get, but explains that a 403 here usually means a private war log."""
+def _get_war_data(path):
+    """Like _get_with_retry, but explains that a 403 here usually means a private war log."""
     try:
-        return _get(path, token)
+        return _get_with_retry(path)
     except InvalidTokenError:
         raise WarLogPrivateError(
-            "The API refused access to this war data (HTTP 403). Your token "
-            "already works for basic clan information, so the most likely cause "
-            "is that your clan's war log is set to private. A leader or co-leader "
-            "can make it public in the game: Clan Settings > War Log > Public. "
-            "Less likely: your public IP address changed since the key was created."
+            "The API refused access to this war data (HTTP 403), even after "
+            "trying a freshly refreshed token. Your token already works for "
+            "basic clan information, so the most likely cause is that your "
+            "clan's war log is set to private. A leader or co-leader can make "
+            "it public in the game: Clan Settings > War Log > Public."
         )
 
 
 def get_current_war():
     """GET /clans/{tag}/currentwar. state may be notInWar, preparation, inWar, warEnded."""
-    token, clan_tag = load_config()
-    return _get_war_data(f"/clans/{_tag_path(clan_tag)}/currentwar", token)
+    _, clan_tag = load_config()
+    return _get_war_data(f"/clans/{_tag_path(clan_tag)}/currentwar")
 
 
 def get_war_log_items(limit=50):
     """GET /clans/{tag}/warlog. Returns the list of finished wars (clan-level only)."""
-    token, clan_tag = load_config()
-    data = _get_war_data(f"/clans/{_tag_path(clan_tag)}/warlog?limit={int(limit)}", token)
+    _, clan_tag = load_config()
+    data = _get_war_data(f"/clans/{_tag_path(clan_tag)}/warlog?limit={int(limit)}")
     return data.get("items", [])
 
 
 def get_cwl_group():
     """GET /clans/{tag}/currentwar/leaguegroup. Returns None if not in CWL right now."""
-    token, clan_tag = load_config()
+    _, clan_tag = load_config()
     try:
-        return _get_war_data(
-            f"/clans/{_tag_path(clan_tag)}/currentwar/leaguegroup", token
-        )
+        return _get_war_data(f"/clans/{_tag_path(clan_tag)}/currentwar/leaguegroup")
     except NotFoundError:
         return None
 
 
 def get_cwl_war(war_tag):
     """GET /clanwarleagues/wars/{warTag}. One CWL war between two clans."""
-    token, _ = load_config()
-    return _get_war_data(f"/clanwarleagues/wars/{_tag_path(war_tag)}", token)
+    load_config()
+    return _get_war_data(f"/clanwarleagues/wars/{_tag_path(war_tag)}")
 
 
 def get_capital_raid_seasons(limit=20):
     """GET /clans/{tag}/capitalraidseasons. Returns the list of raid weekends."""
-    token, clan_tag = load_config()
-    data = _get(f"/clans/{_tag_path(clan_tag)}/capitalraidseasons?limit={int(limit)}", token)
+    _, clan_tag = load_config()
+    data = _get_with_retry(f"/clans/{_tag_path(clan_tag)}/capitalraidseasons?limit={int(limit)}")
     return data.get("items", [])
 
 
@@ -263,10 +319,10 @@ def get_player_info(raw_player_tag):
     equipment, troops, spells, pets, achievements, trophies, war stars, etc.
     Works for ANY public player tag, not just members of the configured clan.
     """
-    token, _ = load_config()
+    load_config()
     tag = normalize_tag(raw_player_tag, label="player tag")
     try:
-        return _get(f"/players/{_tag_path(tag)}", token)
+        return _get_with_retry(f"/players/{_tag_path(tag)}")
     except NotFoundError:
         raise NotFoundError(
             f"No player exists with tag {tag}. Double-check it in-game under "

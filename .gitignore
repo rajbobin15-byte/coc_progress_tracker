@@ -1,0 +1,17 @@
+# Secrets - never commit these
+.env
+
+# Local database + logs (data is per-environment, not source code)
+data/*.db
+data/*.db-journal
+logs/*.log
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS/editor cruft
+.DS_Store
+Thumbs.db
