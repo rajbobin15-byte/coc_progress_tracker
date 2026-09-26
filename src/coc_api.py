@@ -122,24 +122,34 @@ def _resolve_token(force_refresh=False):
     COC_PASSWORD are set; otherwise falls back to the static COC_API_TOKEN
     env var.
     """
+    auto_refresh_error = None
     if token_manager.auto_refresh_enabled():
         try:
             token = token_manager.ensure_token(force_refresh=force_refresh)
             if token:
                 return token
         except token_manager.TokenRefreshError as exc:
+            auto_refresh_error = str(exc)
             if force_refresh:
-                raise ConfigError(f"Could not auto-refresh the Clash of Clans API token: {exc}")
+                raise ConfigError(
+                    f"Could not auto-refresh the Clash of Clans API token: {exc}"
+                )
             # Fall through and try the static token below, in case a manually
-            # set COC_API_TOKEN still works.
+            # set COC_API_TOKEN still works - but keep the real reason so it
+            # can be reported if that fallback also comes up empty.
 
     token = os.getenv("COC_API_TOKEN", "").strip()
     if token and token != PLACEHOLDER_TOKEN:
         return token
 
+    if auto_refresh_error:
+        raise ConfigError(
+            "Automatic token refresh failed, and no static COC_API_TOKEN is set "
+            f"as a fallback. Underlying error: {auto_refresh_error}"
+        )
     raise ConfigError(
         "No usable COC_API_TOKEN, and automatic refresh (COC_EMAIL/COC_PASSWORD) "
-        "is either not configured or failed."
+        "is not configured."
     )
 
 
