@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 import pandas as pd
 import streamlit as st
 
-from src.coc_api import ClashAPIError
+from src.coc_api import ClashAPIError, ManualTokenRequired
 
 STATE_LABELS = {
     "notInWar": "Not in war",
@@ -59,10 +59,36 @@ def int_cols(df, cols):
     return df
 
 
+def render_token_recovery(exc, key):
+    """
+    Show a ClashAPIError. If it's ManualTokenRequired, also show the current
+    outbound IP and a small form to paste in a fresh token - saving it to
+    the database so it's used for every request from then on, no code or
+    Render env var changes needed.
+    """
+    st.error(f"**{exc.title}**\n\n{exc}")
+    if not isinstance(exc, ManualTokenRequired):
+        return
+    from src.token_manager import save_manual_token
+
+    st.code(exc.current_ip, language=None)
+    new_token = st.text_input(
+        "Paste the new API token for this IP", type="password", key=f"{key}_new_token"
+    )
+    if st.button("Save token", key=f"{key}_save_token"):
+        if new_token.strip():
+            save_manual_token(new_token)
+            st.success("Token saved. Retrying...")
+            st.rerun()
+        else:
+            st.warning("Paste a token first.")
+
+
 def fetch_button(label, key, work):
     """
     Show a button. On click run work(), which returns a list of
-    (kind, message) where kind is success / info / warning / error.
+    (kind, message) where kind is success / info / warning / error, or
+    "manual_token" with a ManualTokenRequired exception as the payload.
     API and database errors are shown clearly. Returns True if work finished.
     """
     if not st.button(label, key=key):
@@ -71,14 +97,17 @@ def fetch_button(label, key, work):
         with st.spinner("Contacting the Clash of Clans API..."):
             results = work()
     except ClashAPIError as exc:
-        st.error(f"**{exc.title}**\n\n{exc}")
+        render_token_recovery(exc, key=key)
         return False
     except sqlite3.Error as exc:
         st.error(f"**Database error**\n\n{exc}")
         return False
 
-    for kind, text in results:
-        getattr(st, kind)(text)
+    for kind, payload in results:
+        if kind == "manual_token":
+            render_token_recovery(payload, key=key)
+        else:
+            getattr(st, kind)(payload)
     return True
 
 

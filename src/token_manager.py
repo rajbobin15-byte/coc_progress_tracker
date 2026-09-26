@@ -167,6 +167,35 @@ def _mint_token(ip_address):
 
 # ---------------------------------------------------------------- public
 
+def get_stored_token():
+    """The token currently saved in the database (manually entered or
+    auto-minted), or None if nothing is stored yet."""
+    token, _ = _load_stored_token()
+    return token
+
+
+def save_manual_token(token):
+    """Save a token a human pasted in (e.g. after being shown the current
+    IP) so every future request uses it - until it, too, gets rejected."""
+    token = (token or "").strip()
+    if not token:
+        raise TokenRefreshError("No token was entered.")
+    try:
+        ip_address = _current_ip()
+    except TokenRefreshError:
+        ip_address = "unknown"
+    _save_token(token, ip_address)
+
+
+def safe_current_ip():
+    """Best-effort current public IP, for display in error messages - never
+    raises, since this is called while we're already handling an error."""
+    try:
+        return _current_ip()
+    except TokenRefreshError:
+        return "unknown (could not reach api.ipify.org)"
+
+
 def ensure_token(force_refresh=False):
     """
     Return a token that should work for this process's current IP.

@@ -27,6 +27,7 @@ from src.analytics_ui import (
 )
 from src.coc_api import (
     ClashAPIError,
+    ManualTokenRequired,
     RateLimitError,
     WarLogPrivateError,
     get_clan_info,
@@ -39,6 +40,8 @@ from src.ui_helpers import current_clan_tag, fmt
 # ---------------------------------------------------------------- fetch
 
 def _problem(exc):
+    if isinstance(exc, ManualTokenRequired):
+        return "manual_token", exc
     kind = "warning" if isinstance(exc, WarLogPrivateError) else "error"
     return kind, f"**{exc.title}**\n\n{exc}"
 

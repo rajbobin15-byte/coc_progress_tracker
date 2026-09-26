@@ -25,6 +25,7 @@ from src.analytics_ui import (
 )
 from src.coc_api import (
     ClashAPIError,
+    ManualTokenRequired,
     NotFoundError,
     WarLogPrivateError,
     get_clan_info,
@@ -53,6 +54,8 @@ def _fetch(clan_tag):
         group = get_cwl_group()
     except WarLogPrivateError as exc:
         return [("warning", f"**{exc.title}**\n\n{exc}")]
+    except ManualTokenRequired as exc:
+        return [("manual_token", exc)]
     except ClashAPIError as exc:
         return [("error", f"**{exc.title}**\n\n{exc}")]
 
@@ -86,6 +89,9 @@ def _fetch(clan_tag):
                 war = get_cwl_war(tag)
             except NotFoundError:
                 continue
+            except ManualTokenRequired as exc:
+                results.append(("manual_token", exc))
+                break
             except ClashAPIError as exc:
                 results.append((
                     "error",

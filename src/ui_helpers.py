@@ -7,6 +7,7 @@ import streamlit as st
 
 from src.coc_api import ClashAPIError, get_clan_info, load_config
 from src.database import save_snapshot
+from src.analytics_ui import render_token_recovery
 
 ROLE_LABELS = {
     "leader": "Leader",
@@ -35,7 +36,7 @@ def current_clan_tag():
     try:
         return load_config()[1]
     except ClashAPIError as exc:
-        st.error(f"**{exc.title}**\n\n{exc}")
+        render_token_recovery(exc, key="clan_tag")
         return None
 
 
@@ -52,7 +53,7 @@ def fetch_and_save_snapshot(key):
             clan = get_clan_info()
             snapshot_id = save_snapshot(clan)
     except ClashAPIError as exc:
-        st.error(f"**{exc.title}**\n\n{exc}")
+        render_token_recovery(exc, key=key)
         return None
     except sqlite3.Error as exc:
         st.error(f"**Database error**\n\n{exc}")

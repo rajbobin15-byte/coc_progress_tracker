@@ -40,6 +40,19 @@ class InvalidTokenError(ClashAPIError):
     title = "Invalid token or IP address"
 
 
+class ManualTokenRequired(ClashAPIError):
+    """
+    Raised when the token in use was rejected and nothing could refresh it
+    automatically. Carries current_ip so the caller (a Streamlit page) can
+    show it and offer a box to paste a freshly created token into.
+    """
+    title = "New token needed"
+
+    def __init__(self, message, current_ip=None):
+        super().__init__(message)
+        self.current_ip = current_ip
+
+
 class NotFoundError(ClashAPIError):
     title = "Clan not found"
 
@@ -117,11 +130,22 @@ def load_config():
 
 def _resolve_token(force_refresh=False):
     """
-    Return a token to use right now. Prefers the auto-refresh path (a token
-    minted for the current IP, cached in the database) when COC_EMAIL/
-    COC_PASSWORD are set; otherwise falls back to the static COC_API_TOKEN
-    env var.
+    Return a token to use right now, in priority order:
+    1. A token saved in the database - whether a human pasted it in after
+       being shown the current IP, or a previous auto-refresh minted it.
+       This always wins once present, since it's the most recently
+       known-good token for wherever this app is currently running.
+    2. If COC_EMAIL/COC_PASSWORD are set, mint one automatically.
+    3. The static COC_API_TOKEN env var, as a last resort.
+    force_refresh=True skips the stored token (it just proved invalid) and
+    tries to mint a fresh one automatically; if that isn't configured or
+    fails, the caller is expected to fall back to asking a human.
     """
+    if not force_refresh:
+        stored = token_manager.get_stored_token()
+        if stored:
+            return stored
+
     auto_refresh_error = None
     if token_manager.auto_refresh_enabled():
         try:
@@ -130,13 +154,6 @@ def _resolve_token(force_refresh=False):
                 return token
         except token_manager.TokenRefreshError as exc:
             auto_refresh_error = str(exc)
-            if force_refresh:
-                raise ConfigError(
-                    f"Could not auto-refresh the Clash of Clans API token: {exc}"
-                )
-            # Fall through and try the static token below, in case a manually
-            # set COC_API_TOKEN still works - but keep the real reason so it
-            # can be reported if that fallback also comes up empty.
 
     token = os.getenv("COC_API_TOKEN", "").strip()
     if token and token != PLACEHOLDER_TOKEN:
@@ -166,6 +183,19 @@ def _error_details(response):
     return "", ""
 
 
+def _proxies():
+    """
+    Optional forward proxy with a fixed IP (see COC_PROXY_URL), used so the
+    outbound IP Supercell sees is always the same, regardless of what IP
+    Render itself is using for this particular connection.
+    Format: http://user:pass@proxy-host:port
+    """
+    proxy_url = os.getenv("COC_PROXY_URL", "").strip()
+    if not proxy_url:
+        return None
+    return {"http": proxy_url, "https": proxy_url}
+
+
 def _get(path, token):
     url = f"{BASE_URL}{path}"
     headers = {
@@ -174,7 +204,9 @@ def _get(path, token):
     }
 
     try:
-        response = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+        response = requests.get(
+            url, headers=headers, timeout=REQUEST_TIMEOUT, proxies=_proxies()
+        )
     except requests.exceptions.Timeout:
         raise NetworkError(
             f"The request timed out after {REQUEST_TIMEOUT} seconds. "
@@ -234,19 +266,33 @@ def _get(path, token):
 
 def _get_with_retry(path):
     """
-    Like _get, but if the token is rejected (403) and auto-refresh is
-    configured, mint a fresh token for the current IP and retry once before
-    giving up. This is what lets the app heal itself after Render (or any
-    host with a non-static IP) restarts with a new outbound address.
+    Like _get, but if the token is rejected (403): try auto-refresh first
+    (if COC_EMAIL/COC_PASSWORD are configured); if that isn't available or
+    doesn't work either, raise ManualTokenRequired with the current outbound
+    IP so a human can create a token for it and paste it in.
     """
     token = _resolve_token()
     try:
         return _get(path, token)
     except InvalidTokenError:
-        if not token_manager.auto_refresh_enabled():
-            raise
-        token = _resolve_token(force_refresh=True)
-        return _get(path, token)
+        pass
+
+    if token_manager.auto_refresh_enabled():
+        try:
+            token = _resolve_token(force_refresh=True)
+            return _get(path, token)
+        except InvalidTokenError:
+            pass
+
+    ip_address = token_manager.safe_current_ip()
+    raise ManualTokenRequired(
+        "The Clash of Clans API rejected the current token (HTTP 403). This "
+        f"process's current outbound IP is **{ip_address}**. Create or update "
+        "a key for this IP at developer.clashofclans.com, then paste the new "
+        "token in below - it will be saved and used for every request from "
+        "now on.",
+        current_ip=ip_address,
+    )
 
 
 # ---------------------------------------------------------------- public API
@@ -274,13 +320,16 @@ def _get_war_data(path):
     """Like _get_with_retry, but explains that a 403 here usually means a private war log."""
     try:
         return _get_with_retry(path)
-    except InvalidTokenError:
+    except ManualTokenRequired as exc:
         raise WarLogPrivateError(
             "The API refused access to this war data (HTTP 403), even after "
-            "trying a freshly refreshed token. Your token already works for "
-            "basic clan information, so the most likely cause is that your "
-            "clan's war log is set to private. A leader or co-leader can make "
-            "it public in the game: Clan Settings > War Log > Public."
+            "trying to refresh the token. Your token already works for basic "
+            "clan information, so the most likely cause is that your clan's "
+            "war log is set to private. A leader or co-leader can make it "
+            "public in the game: Clan Settings > War Log > Public. Less "
+            "likely: the token needs updating for this process's current "
+            f"outbound IP ({exc.current_ip}) - the Dashboard's 'Test API "
+            "Connection' button will prompt for a new token if that's the case."
         )
 
 

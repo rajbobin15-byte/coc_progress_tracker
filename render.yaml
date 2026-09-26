@@ -19,4 +19,7 @@ services:
                        # automatic token refresh - see .env.example
       - key: COC_PASSWORD
         sync: false   # optional, paired with COC_EMAIL above
+      - key: COC_PROXY_URL
+        sync: false   # optional: route CoC API calls through a fixed-IP
+                       # proxy (recommended) - see .env.example
 

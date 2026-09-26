@@ -15,6 +15,7 @@ from src.ui_helpers import (
     fmt,
     local_time,
 )
+from src.analytics_ui import render_token_recovery
 from src.wars_page import render_wars
 
 st.set_page_config(
@@ -48,7 +49,7 @@ def render_api_test():
             try:
                 st.session_state["clan_data"] = get_clan_info()
             except ClashAPIError as exc:
-                st.error(f"**{exc.title}**\n\n{exc}")
+                render_token_recovery(exc, key="dashboard_test")
 
     clan = st.session_state.get("clan_data")
     if not clan:
