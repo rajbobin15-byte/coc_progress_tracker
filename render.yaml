@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: clash-of-clans-tracker
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run app.py --server.port=$PORT --server.address=0.0.0.0 --server.headless=true
+    envVars:
+      - key: COC_API_TOKEN
+        sync: false   # set the real value in the Render dashboard, not here
+      - key: CLAN_TAG
+        sync: false
+      - key: DATABASE_URL
+        sync: false   # your Neon connection string, e.g. postgresql://user:pass@host/db?sslmode=require
+                       # leave this var unset entirely to keep using local SQLite instead
+
